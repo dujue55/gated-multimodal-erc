@@ -31,8 +31,8 @@ Ablations of gated fusion (emotion2vec):
 | Current utterance only (no context) | 0.712 ± 0.011 | 0.712 | 0.709 |
 | No gate penalty | 0.775 ± 0.006 | 0.778 | 0.773 |
 
-*Leave-one-session-out on IEMOCAP, four classes. Mean ± standard deviation over three seeds. Bold: best in each
-column.*
+*Leave-one-session-out on IEMOCAP, four classes. Mean ± standard deviation over three seeds. Bold: best result
+in the main table.*
 
 ## Setup
 
