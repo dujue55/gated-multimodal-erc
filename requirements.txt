@@ -1,15 +1,11 @@
-# Cloud/Production dependencies: Flexible versions for core libraries
+# Kaggle GPU image: torch, torchaudio, numpy, pandas, scikit-learn and matplotlib are preinstalled.
+# Install with: pip install -r requirements.txt --no-deps
 transformers==4.36.2
-tokenizers>=0.15.0
-librosa
-scikit-learn==1.3.2  
-numpy==1.26.4       
-pandas==2.1.4        
-tqdm
-matplotlib
-PyYAML
+tokenizers==0.15.2
 funasr==1.0.21
-torch_complex
-kaldiio
 modelscope
 hydra-core
+torch_complex
+kaldiio
+librosa
+PyYAML

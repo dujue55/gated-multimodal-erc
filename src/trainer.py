@@ -1,478 +1,182 @@
-# src/trainer.py 
+"""Training and leave-one-session-out evaluation.
 
-import torch
-import torch.nn as nn
-from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
-from tqdm.auto import tqdm 
-from sklearn.metrics import f1_score, recall_score, accuracy_score 
-import pandas as pd
+Protocol per fold: train on the training dialogues, pick the epoch with the best validation
+macro-F1 (early stopping), then evaluate that model once on the held-out test session.
+"""
+
+import copy
+import random
 import time
-import copy 
-from utils.collate import collate_epc 
+
 import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+from sklearn.metrics import accuracy_score, f1_score, recall_score
+from torch.utils.data import DataLoader
 
-# --- 从其他模块导入必要的组件 ---
-from model import GatedMultimodalEPC, TextOnlyModel, SpeechOnlyModel, BaseWavLMModel
-# 假设 features.py 中的 get_dummy_features 现在返回 F_t, F_s_e2v, F_s_wavlm (三个)
-from features import get_dummy_features, get_dummy_labels, TEXT_DIM, SPEECH_DIM 
-from dataset import IEMOCAPDataset 
+from dataset import SESSIONS, ERCDataset, build_samples, split_dialogues
+from model import EmotionModel
+from utils.collate import collate_epc
 
+# Fixed before the final runs; not tuned on test results
+DEFAULT_CONFIG = {
+    'history_len': 3,
+    'lambda_balance': 5e-4,   # weight of the (gate - 0.5)^2 penalty, gated fusion only
+    'hidden_size': 256,
+    'num_classes': 4,
+    'batch_size': 32,
+    'learning_rate': 1e-4,
+    'weight_decay': 1e-5,
+    'max_epochs': 50,
+    'patience': 10,
+    'val_fraction': 0.2,
+    'split_seed': 0,
+}
 
-# --- 占位符：虚拟数据集 (用于本地测试) ---
-class DummyConversationDataset(Dataset):
-    # ... (初始化和 __len__ 保持不变) ...
-    def __init__(self, num_samples, history_len, num_classes):
-        self.num_samples = num_samples
-        self.history_len = history_len
-        self.num_classes = num_classes
-        
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, idx):
-        F_t, F_s_e2v, F_s_wavlm = get_dummy_features(batch_size=1, sequence_length=self.history_len)
-        labels = get_dummy_labels(batch_size=1, num_classes=self.num_classes)
-        
-        # 默认使用 F_s_e2v 作为通用 F_s 进行测试
-        return {
-            'F_t': F_t.squeeze(0).float(),
-            'F_s': F_s_e2v.squeeze(0).float(),
-            'target_label': labels.squeeze(0).long(),
-            'mask': torch.ones(self.history_len, dtype=torch.bool)
-        }
-
-
-class Trainer:
-    # ... (__init__ 保持不变) ...
-    def __init__(self, model, learning_rate, weight_decay, num_classes, patience=10, speech_only=False):
-        """
-        Trainer class with speech_only flag for WavLM single-modality control.
-        """
-        self.model = model
-        self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = AdamW(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
-
-        self.num_classes = num_classes
-        self.patience = patience
-        
-       
-        self.speech_only = speech_only
-        print(f"[Trainer Init] speech_only={self.speech_only} ({self.model.__class__.__name__})")
-
-        
-
-    def train_epoch(self, dataloader, epoch_idx):
-        self.model.train()
-        total_loss = 0
-        all_preds = []
-        all_labels = []
-
-        desc = f"Epoch {epoch_idx + 1:02d} | Train"
-        for batch in tqdm(dataloader, desc=desc, disable=True): 
-            # ... (训练逻辑保持不变) ...
-            F_t = batch['F_t'].to(self.device)
-            F_s = batch['F_s'].to(self.device)
-            labels = batch['target_label'].to(self.device)
-
-            self.optimizer.zero_grad()
-
-            # --- 前向传播 ---
-            if isinstance(self.model, BaseWavLMModel) and self.speech_only:
-                F_t_input = None
-            else:
-                F_t_input = F_t
-
-            model_output = self.model(F_t_input, F_s)
-
-            # --- 区分是否有 gate 输出 ---
-            if isinstance(model_output, tuple):
-                logits, W_gate = model_output
-            else:
-                logits = model_output
-                W_gate = None
-
-            # --- 标签维度调整 ---
-            if labels.dim() > 1:
-                labels = labels.squeeze(-1)
-
-            # --- 基础交叉熵损失 ---
-            loss = self.criterion(logits, labels)
-
-            
-            # 仅对 GatedMultimodalEPC 模型启用
-            if W_gate is not None and isinstance(self.model, GatedMultimodalEPC):
-                lambda_balance = 5e-4   # 可调，建议从 1e-3 开始
-                loss_balance = torch.mean((W_gate - 0.5) ** 2)
-                loss = loss + lambda_balance * loss_balance
-
-            # --- 反向传播 ---
-            loss.backward()
-            self.optimizer.step()
+# The eight settings of the study. Unlisted keys come from DEFAULT_CONFIG.
+SETTINGS = {
+    'Text-Only':                {'fusion': 'text',   'speech_feature': 'e2v'},
+    'Speech-Only (E2V)':        {'fusion': 'speech', 'speech_feature': 'e2v'},
+    'Speech-Only (WavLM)':      {'fusion': 'speech', 'speech_feature': 'wavlm'},
+    'Gated Fusion (E2V)':       {'fusion': 'gated',  'speech_feature': 'e2v'},
+    'Gated Fusion (WavLM)':     {'fusion': 'gated',  'speech_feature': 'wavlm'},
+    'Fixed Fusion (E2V)':       {'fusion': 'fixed',  'speech_feature': 'e2v'},
+    'Gated Fusion (E2V), current utterance only': {'fusion': 'gated', 'speech_feature': 'e2v',
+                                                   'history_len': 0},
+    'Gated Fusion (E2V), no gate penalty':        {'fusion': 'gated', 'speech_feature': 'e2v',
+                                                   'lambda_balance': 0.0},
+}
 
 
-            total_loss += loss.item() * labels.size(0)
-            
-            preds = torch.argmax(logits, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            
-        avg_loss = total_loss / len(dataloader.dataset)
-        macro_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
-        
-        return avg_loss, macro_f1
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
-    def evaluate(self, dataloader, desc="Evaluation"):
-        self.model.eval() 
-        total_loss = 0
-        all_preds = []
-        all_labels = []
-        all_gate_weights = [] 
-
-        with torch.no_grad():
-            for batch in tqdm(dataloader, desc=desc, disable=True): 
-                F_t = batch['F_t'].to(self.device)
-                F_s = batch['F_s'].to(self.device)
-                labels = batch['target_label'].to(self.device)
-                
-                if labels.dim() > 1:
-                    labels = labels.squeeze(-1)
-
-                if isinstance(self.model, BaseWavLMModel) and self.speech_only:
-                    F_t_input = None
-                else:
-                    F_t_input = F_t
-
-                model_output = self.model(F_t_input, F_s)
-                
-                if isinstance(model_output, tuple): 
-                    logits = model_output[0]
-                    gate_weights = model_output[1] 
-                    
-                    # 收集最后一个回合的平均权重
-                    # avg_gate_per_sample = gate_weights[:, -1, :].mean(dim=-1).cpu().numpy()
-                    # all_gate_weights.extend(avg_gate_per_sample)
-                    #  计算每个样本在时间维上的平均 gate（每一轮话的整体偏好）
-                    gate_mean_per_sample = gate_weights.mean(dim=(1, 2)).cpu().numpy()  # 平均值
-
-                    #  计算每个样本内部（时间维）的标准差，表示动态变化程度
-                    gate_std_per_sample = gate_weights.std(dim=1).mean(dim=1).cpu().numpy()  # 平均波动幅度
-
-                    #  保存两种统计量
-                    all_gate_weights.append({
-                        "mean": gate_mean_per_sample,
-                        "std": gate_std_per_sample
-                    })
-
-                else:
-                    logits = model_output 
-                
-                loss = self.criterion(logits, labels)
-                total_loss += loss.item() * labels.size(0)
-                
-                preds = torch.argmax(logits, dim=1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-
-        avg_loss = total_loss / len(dataloader.dataset)
-        macro_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
-        uar = recall_score(all_labels, all_preds, average='macro', zero_division=0)
-        wa = accuracy_score(all_labels, all_preds)   # ✅ 新增 Weighted Accuracy
-        
-        return avg_loss, macro_f1, uar, wa, all_labels, all_preds, all_gate_weights  # ✅ 多返回一个 WA
+def masked_mean(values, mask):
+    """Mean of values [B, L, D] over the real (unpadded) positions."""
+    m = mask.unsqueeze(-1).float()
+    return (values * m).sum() / (m.sum() * values.shape[-1])
 
 
-# --- 外部运行函数 (run_cross_validation) ---
+def train_epoch(model, loader, optimizer, lambda_balance, device):
+    model.train()
+    for batch in loader:
+        mask = batch['mask'].to(device)
+        logits, gate = model(batch['F_t'].to(device), batch['F_s'].to(device), batch['lengths'])
+        loss = F.cross_entropy(logits, batch['label'].to(device))
+        if gate is not None and lambda_balance > 0:
+            loss = loss + lambda_balance * masked_mean((gate - 0.5) ** 2, mask)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
 
-def run_cross_validation(ModelClass, config):
-    
-   
-    if 'original_data_root' not in config:
-        config['original_data_root'] = config.get('data_root', '/path/to/iemocap') # 适配本地测试
-    
-    # 根据模型类型确定使用的语音特征 tag
-    model_name = ModelClass.__name__
-    if model_name in ['GatedMultimodalEPC', 'SpeechOnlyModel', 'TextOnlyModel']:
-        tag = 'e2v'
-    elif model_name == 'BaseWavLMModel':
-        tag = 'wavlm'
-    else:
-        raise ValueError(f"Unknown Model Class {model_name} for tag determination.")
+@torch.no_grad()
+def evaluate(model, loader, device):
+    """Metrics plus per-sample predictions. Gate statistics use real positions only."""
+    model.eval()
+    rows = []
+    for batch in loader:
+        lengths = batch['lengths']
+        logits, gate = model(batch['F_t'].to(device), batch['F_s'].to(device), lengths)
+        preds = logits.argmax(dim=1).cpu().numpy()
+        for i, utt_id in enumerate(batch['utt_id']):
+            row = {'utt_id': utt_id, 'label': int(batch['label'][i]), 'pred': int(preds[i])}
+            if gate is not None:
+                g = gate[i, :lengths[i]]                       # [L_i, D], text weight
+                row['gate_mean'] = g.mean().item()             # over positions and dimensions
+                row['gate_target'] = g[-1].mean().item()       # target utterance only
+                row['gate_dim_std'] = g[-1].std().item()       # spread across dimensions
+                row['gate_time_std'] = g.std(dim=0).mean().item() if len(g) > 1 else float('nan')
+            rows.append(row)
+
+    df = pd.DataFrame(rows)
+    metrics = {
+        'macro_f1': f1_score(df['label'], df['pred'], average='macro', zero_division=0),
+        'uar': recall_score(df['label'], df['pred'], average='macro', zero_division=0),
+        'accuracy': accuracy_score(df['label'], df['pred']),
+    }
+    return metrics, df
 
 
-    sessions = [f'Session{i}' for i in range(1, 6)] 
-    
-
-    # 初始化结果 DataFrame
-    results_df = pd.DataFrame(columns=['Session', 'Test_Loss', 'Test_Macro_F1', 'Test_UAR', 'Test_WA', 'Train_Time_s', 'Best_Epoch'])
-    all_test_f1s = []
-    
-    # 初始化全局数据收集列表
-    global_labels = []
-    global_preds = []
-    global_gate_weights = []
-    
-    print(f"\n--- Starting 5-Fold Cross-Validation for {ModelClass.__name__} (Feature: {tag}) ---")
-
-    for fold_idx, target_session in enumerate(sessions):
-        start_time = time.time()
-        
-        print(f"\n=======================================================")
-        print(f"| FOLD {fold_idx + 1}/5: Test on {target_session} |")
-        print(f"=======================================================")
-        
-
-        # --- 1. 数据加载 (传入 tag) ---
-        
-        train_dataset = IEMOCAPDataset(
-            config['original_data_root'], 
-            target_session, 
-            is_train=True, 
-            history_len=config['history_len'], 
-            feature_cache_path=config['feature_cache_path'],
-            speech_feature_tag=tag 
-        )
-        test_dataset = IEMOCAPDataset(
-            config['original_data_root'], 
-            target_session, 
-            is_train=False, 
-            history_len=config['history_len'], 
-            feature_cache_path=config['feature_cache_path'],
-            speech_feature_tag=tag 
-        )
-
-        #  替换：使用虚拟数据加载器进行本地测试（如果需要）
-        # train_dataset = DummyConversationDataset(config['test_samples'] * 4, config['history_len'], config['num_classes'])
-        # test_dataset = DummyConversationDataset(config['test_samples'], config['history_len'], config['num_classes'])
-
-        train_dataloader = DataLoader(
-            train_dataset, 
-            batch_size=config['batch_size'], 
-            shuffle=True,
-            collate_fn=collate_epc  # <-- 修正：训练集使用自定义 collate_fn
-        )
-        
-        test_dataloader = DataLoader(
-            test_dataset, 
-            batch_size=config['batch_size'], 
-            shuffle=False,
-            collate_fn=collate_epc   # <-- 修正：测试集使用自定义 collate_fn
-        )
-
-        # --- 2. 初始化模型和 Trainer ---
-        model_instance = ModelClass(
-            text_dim=TEXT_DIM, 
-            speech_dim=SPEECH_DIM, 
-            hidden_size=config['hidden_size'], 
-            num_classes=config['num_classes']
-        )
-        
-        
-        trainer = Trainer(
-            model=model_instance,
-            learning_rate=config['learning_rate'],
-            weight_decay=config['weight_decay'],
-            num_classes=config['num_classes'],
-            patience=config['patience'],
-            speech_only=config.get("speech_only", False)
-        )
-
-        
-        
-        # 每次开始训练前，重置优化器状态
-        trainer.optimizer = AdamW(
-            trainer.model.parameters(), 
-            lr=config['learning_rate'], 
-            weight_decay=config['weight_decay']
-        )
-
-        best_f1 = -1.0
-        epochs_no_improve = 0
-        best_model_state = None
-        best_epoch = 0
-        best_loss = 0.0
-        best_uar = 0.0
-        test_labels_at_best = []
-        test_preds_at_best = []
-        test_gates_at_best = []
+def make_loader(samples, store, batch_size, shuffle, seed):
+    generator = torch.Generator().manual_seed(seed)
+    return DataLoader(ERCDataset(samples, store), batch_size=batch_size, shuffle=shuffle,
+                      collate_fn=collate_epc, generator=generator)
 
 
-        # --- 3. 训练循环 (带早停) ---
-        for epoch in range(config['epochs']):
-            train_loss, train_f1 = trainer.train_epoch(train_dataloader, epoch)
-                    
-            test_loss, test_f1, test_uar, test_wa, test_labels, test_preds, test_gates = trainer.evaluate(test_dataloader, desc="Test/Validation")  
+def run_fold(corpus, store, test_session, cfg, seed, device, verbose=False):
+    """Train one model for one fold. Returns (summary dict, per-sample test predictions)."""
+    split = split_dialogues(corpus, test_session, cfg['val_fraction'], cfg['split_seed'])
+    samples = {k: build_samples(corpus, v, cfg['history_len']) for k, v in split.items()}
 
-            print(f"[Epoch {epoch+1:02d}] | TrainLoss={train_loss:.2f} | TestLoss={test_loss:.2f} | F1={test_f1:.2f} | UAR={test_uar:.2f} | WA={test_wa:.2f}")
+    set_seed(seed)
+    loaders = {
+        'train': make_loader(samples['train'], store, cfg['batch_size'], True, seed),
+        'val': make_loader(samples['val'], store, cfg['batch_size'], False, seed),
+        'test': make_loader(samples['test'], store, cfg['batch_size'], False, seed),
+    }
+    model = EmotionModel(cfg['fusion'], hidden_size=cfg['hidden_size'],
+                         num_classes=cfg['num_classes']).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['learning_rate'],
+                                  weight_decay=cfg['weight_decay'])
 
-            # --- 4. 早停和模型保存 (基于 UAR) ---
-            if test_uar > best_uar:
-                best_uar = test_uar
-                best_f1 = test_f1
-                best_loss = test_loss
-                best_wa = test_wa          # 保存最佳 WA
-                best_model_state = copy.deepcopy(model_instance.state_dict())
-                epochs_no_improve = 0
-                best_epoch = epoch + 1
-                
-                # 收集最佳 UAR 时的原始数据
-                test_labels_at_best = test_labels
-                test_preds_at_best = test_preds
-                test_gates_at_best = test_gates
-            else:
-                epochs_no_improve += 1
-            
-            if epochs_no_improve >= config['patience']:
-                print(f"Early stopping triggered after {best_epoch} epochs (patience={config['patience']}).")
+    start = time.time()
+    best_f1, best_epoch, best_state, waited = -1.0, 0, None, 0
+    for epoch in range(1, cfg['max_epochs'] + 1):
+        train_epoch(model, loaders['train'], optimizer, cfg['lambda_balance'], device)
+        val_f1 = evaluate(model, loaders['val'], device)[0]['macro_f1']
+        if verbose:
+            print(f'  epoch {epoch:2d}: val macro-F1 {val_f1:.4f}')
+        if val_f1 > best_f1:
+            best_f1, best_epoch, best_state, waited = val_f1, epoch, copy.deepcopy(model.state_dict()), 0
+        else:
+            waited += 1
+            if waited >= cfg['patience']:
                 break
-        
-        # --- 5. 记录最终结果 ---
-        train_duration = time.time() - start_time 
-        
-        all_test_f1s.append(best_f1)
-        
-        # 将数据添加到全局列表 (用于汇总所有 Fold 的数据)
-        global_labels.extend(test_labels_at_best)
-        global_preds.extend(test_preds_at_best)
-        global_gate_weights.extend(test_gates_at_best)
+    train_time = time.time() - start
 
-        # 将结果添加到 DataFrame
-        new_row = pd.Series({
-            'Session': target_session,
-            'Test_Loss': best_loss, 
-            'Test_Macro_F1': best_f1,
-            'Test_UAR': best_uar, 
-            'Test_WA': best_wa,     
-            'Train_Time_s': train_duration,
-            'Best_Epoch': best_epoch
-        })
+    # The test session is used exactly once, with the selected model
+    model.load_state_dict(best_state)
+    test_metrics, predictions = evaluate(model, loaders['test'], device)
 
-
-
-        results_df.loc[len(results_df)] = new_row
-            
-    print("\n=======================================================")
-    print(f"| Cross-Validation FINISHED for {ModelClass.__name__} |")
-    print("=======================================================")
-    
-    avg_f1 = results_df['Test_Macro_F1'].mean()
-    std_f1 = results_df['Test_Macro_F1'].std()
-    
-    print(f"Average Macro F1: {avg_f1:.4f} (+/- {std_f1:.4f})")
-
-    results_df = results_df.round(2)
-    # === 保存 Gate 动态性数据 ===
-    if len(global_gate_weights) > 0:
-        gate_means = np.concatenate([x["mean"] for x in global_gate_weights])
-        gate_stds = np.concatenate([x["std"] for x in global_gate_weights])
-        
-        np.savez(
-            f"./gate_stats_{ModelClass.__name__}.npz",
-            gate_means=gate_means,
-            gate_stds=gate_stds
-        )
-        print(f"✅ Gate dynamics saved to gate_stats_{ModelClass.__name__}.npz")
-
-        
-    # 返回结果 DataFrame 和原始数据 (供 Cell 7 用于图表生成)
-    return results_df, global_labels, global_preds, global_gate_weights
-
-
-def run_experiment(config):
-    # --- 1️⃣ 模型类映射 ---
-    model_map = {
-        "GM-EPC": GatedMultimodalEPC,          #  Gated Fusion (E2V)
-        "Text-Only": TextOnlyModel,            #  Text-only baseline
-        "Speech-Only": SpeechOnlyModel,        #  Speech-only (E2V)
-        "Dynamic-WavLM": BaseWavLMModel,       #  Gated Fusion (WavLM)
-        "Speech-Only (WavLM)": BaseWavLMModel  #  新增实验：Speech-only (WavLM)
+    summary = {
+        'test_session': test_session, 'seed': seed, 'best_epoch': best_epoch,
+        'epochs_run': epoch, 'val_macro_f1': best_f1, 'train_time_s': train_time,
+        'n_train': len(samples['train']), 'n_val': len(samples['val']), 'n_test': len(samples['test']),
+        **{f'test_{k}': v for k, v in test_metrics.items()},
     }
-
-    # --- 2️⃣ 模型显示名称映射（用于表格与图例） ---
-    display_name_map = {
-        "GM-EPC": "Gated Fusion (E2V)",
-        "Dynamic-WavLM": "Gated Fusion (WavLM)",
-        "Speech-Only": "Speech-Only (E2V)",
-        "Speech-Only (WavLM)": "Speech-Only (WavLM)",  #  新增
-        "Text-Only": "Text-Only"
-    }
-    
-    if config['model_name'] not in model_map:
-        raise ValueError(f"Unknown model name: {config['model_name']}. Choose from {list(model_map.keys())}")
-        
-    ModelClass = model_map[config['model_name']]
-    # --- 自动添加一个标志，控制 forward 时是否清空 F_t ---
-    if config['model_name'] == "Speech-Only (WavLM)":
-        config["speech_only"] = True
-    else:
-        config["speech_only"] = False
-    
-    # --- 3️⃣ 运行交叉验证 ---
-    final_results = run_cross_validation(ModelClass, config)
-    
-    # --- 4️⃣ 在内部改名：确保 DataFrame 内带上标准化名称 ---
-    if isinstance(final_results, tuple):
-        results_df = final_results[0]
-    else:
-        results_df = final_results
-
-    display_name = display_name_map.get(config['model_name'], config['model_name'])
-    if isinstance(results_df, pd.DataFrame):
-        results_df.insert(0, "Model", display_name)
-        print(f"\n📊 Final summarized results for {display_name}:\n")
-        print(results_df)
-
-    # --- 5️⃣ 保持返回结构一致 ---
-    return final_results
+    predictions.insert(0, 'seed', seed)
+    predictions.insert(0, 'test_session', test_session)
+    return summary, predictions
 
 
-# ====================================================================
-# 本地测试代码块 (if __name__ == '__main__':)
-# ====================================================================
-if __name__ == '__main__':
-    print("--- Starting Local Code Logic Test (Full CV Simulation) ---")
+def run_setting(name, corpus, stores, seeds, device, sessions=SESSIONS, verbose=False):
+    """All folds and seeds of one setting. `stores` maps 'e2v' / 'wavlm' to a FeatureStore."""
+    cfg = {**DEFAULT_CONFIG, **SETTINGS[name]}
+    store = stores[cfg['speech_feature']]
+    folds, predictions = [], []
+    for seed in seeds:
+        for session in sessions:
+            summary, preds = run_fold(corpus, store, session, cfg, seed, device, verbose)
+            folds.append({'setting': name, **summary})
+            predictions.append(preds.assign(setting=name))
+            print(f"{name} | seed {seed} | test {session}: macro-F1 {summary['test_macro_f1']:.4f} "
+                  f"(best epoch {summary['best_epoch']}, {summary['train_time_s']:.0f}s)")
+    return pd.DataFrame(folds), pd.concat(predictions, ignore_index=True)
 
-    # --- 1. 实验配置 (代替 YAML 文件) ---
-    CONFIG = {
-        'model_name': 'GM-EPC', # 测试 Gated Multimodal EPC
-        'data_root': '/path/to/iemocap', 
-        'history_len': 3,
-        'num_classes': 4,
-        'batch_size': 8,
-        'epochs': 10,
-        'learning_rate': 1e-4,
-        'weight_decay': 1e-5,
-        'hidden_size': 64,
-        'test_samples': 20, 
-        'patience': 3,
-        'feature_cache_path': './GM-EPC/data/features_cache', 
-        # 注意：你需要确保 run_cross_validation 使用的是 'data_root' 作为原始路径
-    }
-    
-    # 修正 run_cross_validation 中的路径映射 (确保使用 data_root)
-    CONFIG['original_data_root'] = CONFIG['data_root']
-    
-    # --- 2. 运行完整的虚拟实验 ---
-    try:
-        results_df = run_experiment(CONFIG)
-        
-        print("\n--- Full CV Simulation Successful ---")
-        print("Aggregated Results:")
-        print(results_df)
-        print(f"\nOverall Mean F1: {results_df['Test_Macro_F1'].mean():.4f} (+/- {results_df['Test_Macro_F1'].std():.4f})")
-        print("Training logic and CV loop verified. You are ready for real data!")
-        
-    except Exception as e:
-        print("\n--- Test FAILED ---")
-        print(f"An error occurred during the CV loop: {e}")
-        # 打印详细 traceback
-        import traceback
-        traceback.print_exc()
+
+def summarize(folds):
+    """Mean over the five folds for each seed, then mean and std across seeds."""
+    metrics = ['test_macro_f1', 'test_uar', 'test_accuracy']
+    per_seed = folds.groupby(['setting', 'seed'])[metrics].mean()
+    summary = per_seed.groupby('setting').agg(['mean', 'std'])
+    summary.columns = [f'{m}_{s}' for m, s in summary.columns]
+    summary['n_seeds'] = per_seed.groupby('setting').size()
+    return summary.reindex([s for s in SETTINGS if s in summary.index])

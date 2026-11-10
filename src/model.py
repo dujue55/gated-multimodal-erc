@@ -1,167 +1,68 @@
-# ================================================================
-# ✅ src/model.py (Clean Edition, Oct 2025)
-# 支持以下模型：
-# 1. Text-Only
-# 2. Speech-Only (E2V)
-# 3. Speech-Only (WavLM)
-# 4. Gated Fusion (E2V)
-# 5. Gated Fusion (WavLM)
-# ================================================================
-
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence
+
+FUSIONS = ('text', 'speech', 'gated', 'fixed')
 
 
-# ================================================================
-# 🧠 Model 1: Gated Fusion (E2V)
-# ================================================================
-class GatedMultimodalEPC(nn.Module):
+class EmotionModel(nn.Module):
+    """Utterance features -> (fusion) -> GRU over the context -> classifier.
+
+    All variants share the GRU and the classifier head; they differ only in the input:
+      text   : text features only
+      speech : speech features only
+      gated  : g * text + (1 - g) * speech, with a learned per-dimension gate g in (0, 1)
+      fixed  : 0.5 * text + 0.5 * speech (no learned gate)
     """
-    Gated Multimodal Emotion Prediction in Conversation (GM-EPC)
-    用于 Emotion2Vec (E2V) 特征的动态门控融合模型。
-    """
-    def __init__(self, text_dim, speech_dim, hidden_size, num_classes):
-        super(GatedMultimodalEPC, self).__init__()
-        
-        # 1️⃣ 维度对齐层
-        self.use_projection = (speech_dim != text_dim)
-        if self.use_projection:
-            self.speech_projection = nn.Linear(speech_dim, text_dim)
-        
-        aligned_dim = text_dim
-        
-        # 2️⃣ Gating Unit
-        self.gate_fc = nn.Sequential(
-            nn.Linear(2 * aligned_dim, aligned_dim // 2),
-            nn.ReLU(),
-            nn.LayerNorm(aligned_dim // 2),
-            nn.Linear(aligned_dim // 2, aligned_dim),
-            nn.Sigmoid()
-        )
 
-        # 3️⃣ GRU 层
-        self.gru = nn.GRU(
-            input_size=aligned_dim, 
-            hidden_size=hidden_size, 
-            num_layers=1, 
-            batch_first=True
-        )
-        
-        # 4️⃣ 分类层
+    def __init__(self, fusion, text_dim=768, speech_dim=768, hidden_size=256, num_classes=4,
+                 dropout=0.3):
+        super().__init__()
+        if fusion not in FUSIONS:
+            raise ValueError(f'fusion must be one of {FUSIONS}')
+        self.fusion = fusion
+
+        if fusion in ('gated', 'fixed'):
+            # Map speech features to the text dimension so the two can be mixed
+            self.speech_proj = nn.Linear(speech_dim, text_dim) if speech_dim != text_dim else nn.Identity()
+            input_dim = text_dim
+        else:
+            input_dim = text_dim if fusion == 'text' else speech_dim
+
+        if fusion == 'gated':
+            self.gate = nn.Sequential(
+                nn.Linear(2 * text_dim, text_dim // 2),
+                nn.ReLU(),
+                nn.LayerNorm(text_dim // 2),
+                nn.Linear(text_dim // 2, text_dim),
+                nn.Sigmoid(),
+            )
+
+        self.gru = nn.GRU(input_dim, hidden_size, batch_first=True)
         self.classifier = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_size // 2, num_classes)
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, num_classes),
         )
-    
-    def forward(self, F_t, F_s):
-        F_s_aligned = self.speech_projection(F_s) if self.use_projection else F_s
-        H_t_concat = torch.cat((F_t, F_s_aligned), dim=-1)
-        W_gate = self.gate_fc(H_t_concat)                   # [B, L, D]
-        F_fused = W_gate * F_t + (1 - W_gate) * F_s_aligned
-        gru_out, _ = self.gru(F_fused)
-        final_output = gru_out[:, -1, :]
-        logits = self.classifier(final_output)
-        return logits, W_gate
 
-
-# ================================================================
-# 🗣️ Model 2: Text-Only Baseline
-# ================================================================
-class TextOnlyModel(nn.Module):
-    def __init__(self, text_dim, speech_dim, hidden_size, num_classes):
-        super(TextOnlyModel, self).__init__()
-        self.gru = nn.GRU(text_dim, hidden_size, batch_first=True)
-        self.classifier = nn.Linear(hidden_size, num_classes)
-        
-    def forward(self, F_t, F_s): 
-        gru_out, _ = self.gru(F_t)
-        return self.classifier(gru_out[:, -1, :])
-
-
-# ================================================================
-# 🔊 Model 3: Speech-Only (E2V)
-# ================================================================
-class SpeechOnlyModel(nn.Module):
-    def __init__(self, text_dim, speech_dim, hidden_size, num_classes):
-        super(SpeechOnlyModel, self).__init__()
-        self.gru = nn.GRU(speech_dim, hidden_size, batch_first=True)
-        self.classifier = nn.Linear(hidden_size, num_classes)
-        
-    def forward(self, F_t, F_s): 
-        gru_out, _ = self.gru(F_s)
-        return self.classifier(gru_out[:, -1, :])
-
-
-# ================================================================
-# 🌀 Model 4 & 5: BaseWavLMModel (Gated / Only)
-# ================================================================
-# class BaseWavLMModel(GatedMultimodalEPC):
-#     """
-#     ✅ 通用的 WavLM 模型基类：
-#     - 若传入 F_t=None，则退化为 Speech-Only(WavLM)
-#     - 若传入 F_t!=None，则执行 Gated Fusion(WavLM)
-#     """
-#     def forward(self, F_t, F_s):
-#         if F_t is None:  # Speech-Only 模式
-#             F_s_aligned = self.speech_projection(F_s) if self.use_projection else F_s
-#             gru_out, _ = self.gru(F_s_aligned)
-#             logits = self.classifier(gru_out[:, -1, :])
-#             return logits
-        
-#         return super().forward(F_t, F_s)
-
-class BaseWavLMModel(GatedMultimodalEPC):
-    def forward(self, F_t, F_s):
-        if F_t is None: # Speech-Only 模式
-            gru_out, _ = self.gru(F_s) 
-            logits = self.classifier(gru_out[:, -1, :])
-            return logits
-        
-        # 多模态模式：使用投影，并调用父类 Gated Fusion 逻辑
-        return super().forward(F_t, F_s)
-
-# ================================================================
-# ✅ Local Test (for debugging)
-# ================================================================
-if __name__ == '__main__':
-    try:
-        from features import get_dummy_features, TEXT_DIM, SPEECH_DIM
-    except ImportError:
-        from .features import get_dummy_features, TEXT_DIM, SPEECH_DIM
-
-    print("--- Testing All Model Architectures ---")
-
-    BATCH_SIZE = 8
-    HISTORY_LEN = 3 
-    GRU_HIDDEN_SIZE = 256
-    NUM_CLASSES = 4
-
-    dummy_input_t, dummy_input_s_e2v, dummy_input_s_wavlm = get_dummy_features(BATCH_SIZE, HISTORY_LEN)
-
-    models_to_test = {
-        "Text-Only": (TextOnlyModel, dummy_input_t, dummy_input_s_e2v),
-        "Speech-Only (E2V)": (SpeechOnlyModel, dummy_input_t, dummy_input_s_e2v),
-        "Speech-Only (WavLM)": (BaseWavLMModel, None, dummy_input_s_wavlm),
-        "Gated Fusion (E2V)": (GatedMultimodalEPC, dummy_input_t, dummy_input_s_e2v),
-        "Gated Fusion (WavLM)": (BaseWavLMModel, dummy_input_t, dummy_input_s_wavlm),
-    }
-
-    for name, (ModelClass, Ft, Fs) in models_to_test.items():
-        print(f"\nTesting {name}...")
-        try:
-            model = ModelClass(
-                text_dim=TEXT_DIM, 
-                speech_dim=SPEECH_DIM, 
-                hidden_size=GRU_HIDDEN_SIZE, 
-                num_classes=NUM_CLASSES
-            )
-            output = model(Ft, Fs)
-            if isinstance(output, tuple):
-                logits, W_gate = output
-                print(f"  ✅ logits {logits.shape}, gate {W_gate.shape}")
+    def forward(self, F_t, F_s, lengths):
+        """F_t, F_s: [B, L, D] padded sequences; lengths: [B]. Returns (logits, gate or None)."""
+        gate = None
+        if self.fusion == 'text':
+            x = F_t
+        elif self.fusion == 'speech':
+            x = F_s
+        else:
+            F_s = self.speech_proj(F_s)
+            if self.fusion == 'gated':
+                gate = self.gate(torch.cat((F_t, F_s), dim=-1))   # [B, L, D], weight of text
+                x = gate * F_t + (1 - gate) * F_s
             else:
-                print(f"  ✅ logits {output.shape}")
-        except Exception as e:
-            print(f"  ❌ FAILED: {e}")
+                x = 0.5 * F_t + 0.5 * F_s
+
+        # Packing makes the GRU stop at each sequence's true length, so padding never
+        # reaches the final hidden state.
+        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        _, h_n = self.gru(packed)
+        return self.classifier(h_n[-1]), gate
