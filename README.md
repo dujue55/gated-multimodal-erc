@@ -1,8 +1,13 @@
 # Gated Multimodal Emotion Recognition in Conversation
 
-This project recognises the emotion of an utterance in a conversation from its text and its speech. It asks three
-questions on IEMOCAP: does combining text and speech help, does a learned gate combine them better than a fixed
-average, and do the preceding turns of the conversation help?
+**Why this matters.** Conversational systems, from voice assistants to tools for healthcare and customer support,
+need to sense how a person feels in order to respond well. Text alone often misses it: "I'm fine" is neutral as text,
+but spoken with a tense voice it can sound annoyed. Speech and text may agree in one turn and conflict in the next, so
+combining them with fixed weights may be too rigid. Emotions also build up over a conversation rather than living in
+a single utterance.
+
+**Questions.** On IEMOCAP: does combining text and speech help, does a learned per-dimension gate combine them better
+than a fixed average, and do the preceding turns of the conversation help?
 
 **Findings:** combining text and speech improves macro-F1 by 6 to 7 points over the better single modality. A learned
 gate beats a fixed 50/50 average in all 15 fold-seed pairs. Removing the conversation context costs about 6 points.
@@ -38,11 +43,19 @@ column.*
 - **Evaluation:** each IEMOCAP session is held out once for testing. The epoch is chosen on validation dialogues from
   the training sessions; the test session is used once.
 
-## Limitations
+## What this means
+
+Text and speech carry complementary cues, and a learned gate combines them better than equal weighting. Its average
+weight, however, is about 0.5 for all four emotions: the gate mixes the two modalities differently across feature
+dimensions, but it does not switch to one modality for a given emotion. The preceding turns add about as much as the second
+modality, so a model that sees a single utterance leaves much of the signal unused.
+
+## Limitations and next steps
 
 - One dataset of acted dialogues, with human transcripts instead of speech recognition output.
 - emotion2vec was pre-trained, without labels, on audio that includes IEMOCAP.
 - The fixed baseline is an equal-weight average; concatenation was not tested.
+- Next: transcripts from speech recognition, a concatenation baseline, and a second dataset such as MELD.
 
 ## Files
 
