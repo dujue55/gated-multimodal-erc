@@ -3,7 +3,7 @@
 transformers==4.36.2
 tokenizers==0.15.2
 funasr==1.0.21
-modelscope
+modelscope==1.31.0     # newer versions need modelscope-hub, which --no-deps skips
 hydra-core
 torch_complex
 kaldiio
