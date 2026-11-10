@@ -1,47 +1,67 @@
-# GM-EPC: Gated Multimodal Emotion Prediction in Conversation
+# Gated Multimodal Emotion Recognition in Conversation
 
-## Project Structure
+This project recognises the emotion of an utterance in a conversation from its text and its speech. It asks three
+questions on IEMOCAP: does combining text and speech help, does a learned gate combine them better than a fixed
+average, and do the preceding turns of the conversation help?
 
-The codebase is organized into two main parts:
+**Findings:** combining text and speech improves macro-F1 by 6 to 7 points over the better single modality. A learned
+gate beats a fixed 50/50 average in all 15 fold-seed pairs. Removing the conversation context costs about 6 points.
 
-- src/: Core implementation, including dataset handling, feature extraction, model definition, and training logic.  
-  These modules were developed and tested locally.
+![Test macro-F1 of fused and single-modality models, overall and per test session](figures/results.png)
 
-- notebooks/: Experiment scripts intended to run in a GPU-enabled environment (e.g., Kaggle).  
-  The notebook calls the functions implemented in src/ to reproduce the experiments.
+| Setting | Macro-F1 | UAR | Accuracy |
+|---|---|---|---|
+| Text only | 0.701 ± 0.003 | 0.704 | 0.699 |
+| Speech only (emotion2vec) | 0.708 ± 0.005 | 0.711 | 0.707 |
+| Speech only (WavLM) | 0.673 ± 0.008 | 0.676 | 0.670 |
+| Fixed 0.5 fusion (emotion2vec) | 0.737 ± 0.007 | 0.740 | 0.735 |
+| Gated fusion (emotion2vec) | 0.771 ± 0.006 | 0.776 | 0.769 |
+| Gated fusion (WavLM) | **0.781 ± 0.001** | **0.782** | **0.777** |
 
-## Directory Overview
+Ablations of gated fusion (emotion2vec):
 
-```
-notebooks/  
-  main-experiment.ipynb   # Main experiment notebook (GPU / Kaggle)
+| Setting | Macro-F1 | UAR | Accuracy |
+|---|---|---|---|
+| Full model | 0.771 ± 0.006 | 0.776 | 0.769 |
+| Current utterance only (no context) | 0.712 ± 0.011 | 0.712 | 0.709 |
+| No gate penalty | 0.775 ± 0.006 | 0.778 | 0.773 |
 
-src/  
-  dataset.py              # Dataset loading and preprocessing  
-  features.py             # Speech and text feature extraction  
-  model.py                # GM-EPC model definition  
-  trainer.py              # Training and evaluation logic  
-  utils/                  # Utility functions (e.g., custom collate function for variable-length conversations)
+*Leave-one-session-out on IEMOCAP, four classes. Mean ± standard deviation over three seeds. Bold: best in each
+column.*
 
-requirements.txt          # Dependencies for Kaggle / GPU environment  
-requirements-local.txt    # Dependencies for local development
-```
+## Setup
 
-## Dataset
+- **Features:** frozen encoders, one vector per utterance. Text: BERT. Speech: emotion2vec or WavLM.
+- **Model:** text and speech vectors are fused, then a GRU reads the target utterance and up to three preceding turns.
+  Gated fusion learns a weight g per feature dimension: g · text + (1 − g) · speech. All models share the same GRU and
+  classifier.
+- **Evaluation:** each IEMOCAP session is held out once for testing. The epoch is chosen on validation dialogues from
+  the training sessions; the test session is used once.
 
-This work uses the IEMOCAP dataset, which is publicly available on Kaggle: https://www.kaggle.com/datasets/dejolilandry/iemocapfullrelease
+## Limitations
 
-Due to licensing restrictions, the dataset itself is not included in this repository.
+- One dataset of acted dialogues, with human transcripts instead of speech recognition output.
+- emotion2vec was pre-trained, without labels, on audio that includes IEMOCAP.
+- The fixed baseline is an equal-weight average; concatenation was not tested.
 
-## Feature Cache
+## Files
 
-The file features_cache_backup_new.zip contains cached feature representations extracted from the IEMOCAP dataset.  
-This cache is provided for reproducibility and efficiency purposes.
-## Environment Setup
+| File | Content |
+|---|---|
+| `notebooks/main-experiment.ipynb` | Full run on Kaggle: data checks, training, results |
+| `src/` | Data loading, model, training and feature extraction |
+| `tests/` | Checks for ordering, splits, padding and training |
+| `results/`, `figures/` | Results from the notebook run and the script that draws the figure |
 
-For local development and debugging:
-pip install -r requirements-local.txt
+The notebook runs on Kaggle with a GPU (*Save & Run All*, about 70 minutes). IEMOCAP is available from
+[USC SAIL](https://sail.usc.edu/iemocap/) on request and is not included.
 
-For GPU-based experiments (e.g., Kaggle):
-pip install -r requirements.txt
+## References
 
+- C. Busso et al. *IEMOCAP: Interactive emotional dyadic motion capture database.* Language Resources and
+  Evaluation 42, 335-359 (2008).
+- J. Devlin, M.-W. Chang, K. Lee, K. Toutanova. *BERT: Pre-training of Deep Bidirectional Transformers for Language
+  Understanding.* NAACL 2019.
+- Z. Ma et al. *emotion2vec: Self-Supervised Pre-Training for Speech Emotion Representation.* Findings of ACL 2024.
+- S. Chen et al. *WavLM: Large-Scale Self-Supervised Pre-Training for Full Stack Speech Processing.* IEEE Journal of
+  Selected Topics in Signal Processing 16(6), 1505-1518 (2022).

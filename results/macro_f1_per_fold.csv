@@ -1,0 +1,121 @@
+setting,seed,test_session,macro_f1,best_epoch,train_time_s
+Text-Only,0,Session1,0.6814,26,26
+Text-Only,0,Session2,0.7402,17,19
+Text-Only,0,Session3,0.6868,24,24
+Text-Only,0,Session4,0.6838,21,22
+Text-Only,0,Session5,0.6979,24,24
+Text-Only,1,Session1,0.6901,21,22
+Text-Only,1,Session2,0.7599,25,26
+Text-Only,1,Session3,0.6803,18,20
+Text-Only,1,Session4,0.6766,24,25
+Text-Only,1,Session5,0.6953,20,20
+Text-Only,2,Session1,0.6865,19,21
+Text-Only,2,Session2,0.756,28,28
+Text-Only,2,Session3,0.6986,27,26
+Text-Only,2,Session4,0.6849,17,19
+Text-Only,2,Session5,0.6926,27,25
+Speech-Only (E2V),0,Session1,0.6769,16,18
+Speech-Only (E2V),0,Session2,0.753,30,29
+Speech-Only (E2V),0,Session3,0.6872,26,25
+Speech-Only (E2V),0,Session4,0.6815,22,23
+Speech-Only (E2V),0,Session5,0.7149,50,34
+Speech-Only (E2V),1,Session1,0.6956,25,25
+Speech-Only (E2V),1,Session2,0.7301,27,27
+Speech-Only (E2V),1,Session3,0.6963,25,24
+Speech-Only (E2V),1,Session4,0.6982,25,25
+Speech-Only (E2V),1,Session5,0.7243,34,30
+Speech-Only (E2V),2,Session1,0.6913,20,22
+Speech-Only (E2V),2,Session2,0.7433,31,30
+Speech-Only (E2V),2,Session3,0.6937,28,26
+Speech-Only (E2V),2,Session4,0.6835,21,22
+Speech-Only (E2V),2,Session5,0.7487,28,26
+Speech-Only (WavLM),0,Session1,0.668,37,34
+Speech-Only (WavLM),0,Session2,0.7018,33,31
+Speech-Only (WavLM),0,Session3,0.6401,50,35
+Speech-Only (WavLM),0,Session4,0.6569,27,26
+Speech-Only (WavLM),0,Session5,0.6725,48,34
+Speech-Only (WavLM),1,Session1,0.6762,28,27
+Speech-Only (WavLM),1,Session2,0.6882,37,34
+Speech-Only (WavLM),1,Session3,0.656,49,35
+Speech-Only (WavLM),1,Session4,0.6558,40,36
+Speech-Only (WavLM),1,Session5,0.6746,20,20
+Speech-Only (WavLM),2,Session1,0.6877,47,35
+Speech-Only (WavLM),2,Session2,0.7102,37,33
+Speech-Only (WavLM),2,Session3,0.6585,39,34
+Speech-Only (WavLM),2,Session4,0.645,13,16
+Speech-Only (WavLM),2,Session5,0.7092,18,19
+Gated Fusion (E2V),0,Session1,0.7711,18,30
+Gated Fusion (E2V),0,Session2,0.7997,19,31
+Gated Fusion (E2V),0,Session3,0.7716,26,38
+Gated Fusion (E2V),0,Session4,0.7576,14,26
+Gated Fusion (E2V),0,Session5,0.7865,27,38
+Gated Fusion (E2V),1,Session1,0.7381,16,27
+Gated Fusion (E2V),1,Session2,0.7967,11,23
+Gated Fusion (E2V),1,Session3,0.78,9,20
+Gated Fusion (E2V),1,Session4,0.735,13,25
+Gated Fusion (E2V),1,Session5,0.7745,22,33
+Gated Fusion (E2V),2,Session1,0.7636,21,33
+Gated Fusion (E2V),2,Session2,0.817,15,27
+Gated Fusion (E2V),2,Session3,0.7547,27,39
+Gated Fusion (E2V),2,Session4,0.7412,17,29
+Gated Fusion (E2V),2,Session5,0.7814,47,51
+Gated Fusion (WavLM),0,Session1,0.7791,29,41
+Gated Fusion (WavLM),0,Session2,0.8188,17,29
+Gated Fusion (WavLM),0,Session3,0.7651,11,22
+Gated Fusion (WavLM),0,Session4,0.7808,25,38
+Gated Fusion (WavLM),0,Session5,0.7549,24,35
+Gated Fusion (WavLM),1,Session1,0.7758,22,35
+Gated Fusion (WavLM),1,Session2,0.8114,8,19
+Gated Fusion (WavLM),1,Session3,0.771,10,21
+Gated Fusion (WavLM),1,Session4,0.7879,29,42
+Gated Fusion (WavLM),1,Session5,0.7627,32,44
+Gated Fusion (WavLM),2,Session1,0.7615,10,22
+Gated Fusion (WavLM),2,Session2,0.8165,13,25
+Gated Fusion (WavLM),2,Session3,0.76,15,26
+Gated Fusion (WavLM),2,Session4,0.7906,12,23
+Gated Fusion (WavLM),2,Session5,0.7758,21,32
+Fixed Fusion (E2V),0,Session1,0.6704,18,20
+Fixed Fusion (E2V),0,Session2,0.7666,21,22
+Fixed Fusion (E2V),0,Session3,0.7231,37,32
+Fixed Fusion (E2V),0,Session4,0.7242,38,35
+Fixed Fusion (E2V),0,Session5,0.7561,31,28
+Fixed Fusion (E2V),1,Session1,0.7286,23,24
+Fixed Fusion (E2V),1,Session2,0.7771,24,25
+Fixed Fusion (E2V),1,Session3,0.7198,29,27
+Fixed Fusion (E2V),1,Session4,0.7132,50,37
+Fixed Fusion (E2V),1,Session5,0.7581,27,26
+Fixed Fusion (E2V),2,Session1,0.7324,27,26
+Fixed Fusion (E2V),2,Session2,0.7759,30,29
+Fixed Fusion (E2V),2,Session3,0.7414,33,31
+Fixed Fusion (E2V),2,Session4,0.7196,49,36
+Fixed Fusion (E2V),2,Session5,0.7406,40,35
+"Gated Fusion (E2V), current utterance only",0,Session1,0.7091,10,16
+"Gated Fusion (E2V), current utterance only",0,Session2,0.7279,19,23
+"Gated Fusion (E2V), current utterance only",0,Session3,0.7105,9,15
+"Gated Fusion (E2V), current utterance only",0,Session4,0.694,6,13
+"Gated Fusion (E2V), current utterance only",0,Session5,0.6851,22,25
+"Gated Fusion (E2V), current utterance only",1,Session1,0.7376,27,29
+"Gated Fusion (E2V), current utterance only",1,Session2,0.7492,14,19
+"Gated Fusion (E2V), current utterance only",1,Session3,0.7328,11,16
+"Gated Fusion (E2V), current utterance only",1,Session4,0.702,12,17
+"Gated Fusion (E2V), current utterance only",1,Session5,0.701,15,19
+"Gated Fusion (E2V), current utterance only",2,Session1,0.7025,16,20
+"Gated Fusion (E2V), current utterance only",2,Session2,0.7212,27,30
+"Gated Fusion (E2V), current utterance only",2,Session3,0.7032,24,27
+"Gated Fusion (E2V), current utterance only",2,Session4,0.6886,9,15
+"Gated Fusion (E2V), current utterance only",2,Session5,0.7113,17,21
+"Gated Fusion (E2V), no gate penalty",0,Session1,0.7683,19,30
+"Gated Fusion (E2V), no gate penalty",0,Session2,0.7966,6,16
+"Gated Fusion (E2V), no gate penalty",0,Session3,0.7627,21,32
+"Gated Fusion (E2V), no gate penalty",0,Session4,0.7578,30,42
+"Gated Fusion (E2V), no gate penalty",0,Session5,0.7648,21,31
+"Gated Fusion (E2V), no gate penalty",1,Session1,0.7497,19,30
+"Gated Fusion (E2V), no gate penalty",1,Session2,0.8051,12,23
+"Gated Fusion (E2V), no gate penalty",1,Session3,0.7601,14,24
+"Gated Fusion (E2V), no gate penalty",1,Session4,0.7701,24,36
+"Gated Fusion (E2V), no gate penalty",1,Session5,0.7859,34,44
+"Gated Fusion (E2V), no gate penalty",2,Session1,0.7699,13,24
+"Gated Fusion (E2V), no gate penalty",2,Session2,0.8032,19,30
+"Gated Fusion (E2V), no gate penalty",2,Session3,0.7769,11,21
+"Gated Fusion (E2V), no gate penalty",2,Session4,0.7622,11,22
+"Gated Fusion (E2V), no gate penalty",2,Session5,0.7984,32,42
